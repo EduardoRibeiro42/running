@@ -1,0 +1,1150 @@
+---
+title: "AdvancedRunning"
+output: html_document
+---
+
+
+```{r iLibraries}
+install.packages("RedditExtractoR")
+if (!("rvest" %in% installed.packages())) {
+ install.packages("rvest")
+}
+```
+
+```{r Libraries}
+library(rvest)
+library(RedditExtractoR)
+library(lubridate)
+library(data.table)
+library(stringr)
+library(RJSONIO)
+library(ggplot2)
+library(openxlsx)
+library(readxl)
+library(xml2)
+library(ggpubr)
+library(scales)
+library(png)
+library(magick)
+```
+
+```{r Scrape race reports}
+#Scrape data-----
+if (F){
+reports <- list()
+for (day in 1:600*7){
+  cat(day/7)
+  link   <- paste0("https://api.pushshift.io/reddit/submission/search/?q='race report'&subreddit=AdvancedRunning&before=",day-7,"d&after=", day, "d")
+  tryCatch({
+   result <- fromJSON(paste0(readLines(link, warn = F), collapse = ""))
+   reports[[day/7]] <- result 
+  }, error = function(e){cat("error:", day)}
+  )
+}
+arReports <- reports
+if (F){save(arReports, file = "Data/ar reports.RData")}
+}
+```
+
+```{r Load race reports}
+load("Data/ar reports.RData")
+load("Data/artc reports.RData")
+if (F){
+arReports <- arReports[1:10]
+}
+reports <- c(arReports, artcReports)
+```
+
+```{r Transform race reports and delete reports not relevant}
+#Transform data-----
+perma   <- c()
+day     <- c()
+id      <- c()
+title   <- c()
+text    <- c()
+user    <- c()
+for (i in 1:length(reports)){
+  data <- reports[[i]]$data
+  if (length(data) > 0){
+    for (j in 1:length(data)){
+      perma <- c(perma, data[[j]]$permalink)
+      title <- c(title, data[[j]]$title)
+      text  <- c(text, ifelse(length(data[[j]]$selftext) > 0, data[[j]]$selftext, ""))
+      day   <- c(day, data[[j]]$created_utc)
+      user  <- c(user, data[[j]]$author)
+      id    <- c(id, i)
+    }
+  }
+}
+
+df <- data.frame(id    = id,
+                 perma = perma,
+                 title = title,
+                 text  = as.character(text),
+                 user  = user,
+                 time  = lubridate::as_datetime(day))
+df$text <- as.character(text)
+#Select reports----
+df <- df[!df$text %in% c("[removed]","[deleted]"),]
+df <- df[!str_detect(df$title, "Monthly Reflections|\\[META\\]"),]
+```
+
+```{r Functions for report visualization}
+#Make paragraph
+mpara <- function(text){
+  text <- as.character(text)
+  text <- str_replace_all(text, "\\.[[:space:]]", "\\.\n")
+  text <- str_replace_all(text, "(\n)+", "\n")
+}
+#Visualize race report
+viz <- function(text, s = F, file = "Viz/Random/report.png"){
+  text <- mpara(text)
+  p    <- ggplot(data.frame(x = c(0,1), y =c(0,1))) + 
+          geom_text(x = 0, y = 0, label = text,hjust = 0, vjust = 1, lineheight = .8, size = 6) +
+          scale_x_continuous(limits = c(0,1), expand = c(0.01,0)) +
+          scale_y_continuous(limits = c(-1,0), expand = c(0,0)) +
+          theme(plot.margin = unit(c(0,0,0,0), "cm"),
+          panel.border = element_blank(),
+          text = element_text(lineheight = 5)) + theme_void()
+  if (s){
+  ggsave(plot = p, device = "png", filename = file, height = 15, width = 30)
+  } else {
+  return(p)
+  }
+}
+#Visualize race report up and down-----
+vizUp <- function(text, s = F, file = "Viz/Random/report.png"){
+  text  <- mpara(text)
+  text2 <- paste0(rev(unlist(str_split(text, "\n"))), collapse = "\n")
+  p     <- ggplot(data.frame(x = c(0,1), y =c(0,1))) + 
+          geom_text(x = 0, y = 0, label = text,hjust = 0, vjust = 1, lineheight = .8, size = 6) +
+          scale_x_continuous(limits = c(0,1), expand = c(0.01,0)) +
+          scale_y_continuous(limits = c(-1,0), expand = c(0,0)) +
+          theme(plot.margin = unit(c(0,0,0,0), "cm"),
+          panel.border = element_blank(),
+          text = element_text(lineheight = 5)) + theme_void()
+  p2   <- ggplot(data.frame(x = c(0,1), y =c(0,1))) + 
+          geom_text(x = 0, y = 0, label = text2,
+                    hjust = 0, vjust = 1, lineheight = .8, size = 6) +
+          scale_x_continuous(limits = c(0,1), expand = c(0.01,0)) +
+          scale_y_continuous(limits = c(-1,0), expand = c(0,0)) +
+          theme(plot.margin = unit(c(0,0,0,0), "cm"),
+          panel.border = element_blank(),
+          text = element_text(lineheight = 5)) + theme_void()
+  plot  <- ggpubr::ggarrange(p, p2)
+
+  if (s){
+  ggsave(plot = plot, device = "png", filename = file,
+         height = 15, width = 30)
+  } else {
+  return(plot)
+  }
+}
+##Print race report visualizations
+if (F) {
+join      <- df[,c("title", "time", "text")]
+join$time <- as.character(join$time)
+odf       <- setDT(join)[odf, on = c("title", "time")]
+  for (i in 501:700){
+    cat(i)
+    vizUp(odf$text[i], s = T, file = paste0("Viz/All reports by id/report", i,".png"))
+  }
+}
+
+```
+
+```{r Feature engeneering}
+df$stext <- str_split(mpara(df$text),"\n")
+
+fextract <- function(report, f, all = F, case = F){
+  #report <- df$stext[1]
+  #f      <- "Time"
+  report <- report[[1]] 
+  if (!case){
+  report <- toupper(report)
+  f      <- toupper(f) 
+  }
+  d      <- str_detect(report, f)
+  if (sum(d) > 0){
+    if (!all){
+    get <- report[which(d)[1]]
+    } else {
+    get <- report[which(d)]
+    }
+    return(get)
+  }
+}
+
+#Get distance----
+df$distance <- NA
+for (i in 1:nrow(df)){
+  distance <- fextract(df$stext[i], "distance|how far")
+  if (length(distance) > 0){
+  df$distance[i] <- str_extract(distance, "\\d+.*$")
+  }
+}
+sel <- which(str_detect(toupper(df$title), "5\\s*K|5,000|5000|3\\.1"))
+df$distance[sel] <- "5K"
+sel <- which(str_detect(toupper(df$title), "10\\s*K|10,000|10000|6\\.2"))
+df$distance[sel] <- "10K"
+sel <- which(str_detect(toupper(df$title), "MARATHON|26\\.2|42"))
+df$distance[sel] <- "marathon"
+sel <- which(str_detect(toupper(df$title), "HALF") & str_detect(toupper(df$title), "MARATHON"))
+df$distance[sel] <- "half marathon"
+sel <- which(str_detect(toupper(df$title), "13\\.1|21\\.1"))
+df$distance[sel] <- "half marathon"
+
+#Check most common types
+a   <- data.table(table(df$distance))[order(-N)]
+#Correct some common types
+sel <- str_detect(df$distance, "26|42")
+df$distance2[sel] <- "marathon"
+sel <- str_detect(df$distance, "13|21")
+df$distance2[sel] <- "half marathon"
+sel <- str_detect(toupper(df$distance), "10K| 10 K|10000|10,000")
+df$distance2[sel] <- "10K"
+sel <- str_detect(toupper(df$distance), "5K| 5 K|5000|5,000|(?<!1)3\\.1")
+df$distance2[sel] <- "5K"
+
+#Get race time------
+df$racetime <- NA
+for (i in 1:nrow(df)){
+  time  <- fextract(df$stext[i], "time| finished")
+  if (length(time) > 0){
+  df$racetime[i] <- str_extract(time,
+                    "(?<=[[:space:]])[^[[:space:]]|[[:alpha:]]]+(?<=([[:space:]]|$))")
+  }
+}
+
+
+##Correct times
+{
+df$racetime       <- str_replace_all(df$racetime, "\\.", ":")
+df$racetime2      <- df$racetime
+df$racetime2      <- str_replace_all(df$racetime2, "[^\\d|:]", "")
+sel               <- which(str_count(df$racetime2, ":") == 1 & str_detect(df$distance2, "marathon"))
+df$racetime2[sel] <- paste0(df$racetime2[sel], ":00")
+}
+#Ignore
+if (F){
+validTimes <- expand.grid(paste0("0", 2:6), c(paste0("0", 1:9), 10:59), c(paste0("0", 1:9), 10:59))
+validTimes <- apply(validTimes, 1, paste, collapse = ":")
+sel <- which(df$racetime2 %in% validTimes)
+df <- df[sel,]
+
+t                 <- transpose(data.frame(as.numeric(str_split(df$racetime2, ":"))))
+names(t)          <- c("hours", "mins", "seconds")
+df                <- cbind(df, t)
+df$raceSeconds    <- df$hours*60*60+df$mins*60+df$seconds
+
+df$racetimeF      <- as.POSIXct(df$racetime2, format = "%H:%M:%S")
+}
+#Extract hour, minute, second - ignore
+if (F){
+hour  <- numeric(nrow(df))
+min   <- numeric(nrow(df))
+sec   <- numeric(nrow(df))
+slots <- str_count(df$racetime2, ":")
+slots[is.na(slots)] <- 0
+for (i in 1:nrow(df)){
+  s <- slots[i]
+  if (s == 1){
+    hour[i] <- 0
+    min[i]  <- str_extract(df$racetime2[i], "\\d+(?=:)")
+    sec[i]  <- str_extract(df$racetime2[i], "(?<=:)\\d+") 
+  }
+  if (s == 2){
+    hour[i] <- str_extract(df$racetime2[i], "\\d+(?=:)")
+    min[i]  <- str_extract(df$racetime2[i], "(?<=:)\\d+(?=:)")
+    sec[i]  <- str_extract(df$racetime2[i], "(?<=:)\\d+$") 
+  }
+}
+df$hour <- as.numeric(hour)
+df$min  <- as.numeric(min)
+df$sec  <- as.numeric(sec)
+}
+
+#Get location----
+df$location <- NA
+for (i in 1:nrow(df)){
+  loc <- fextract(df$stext[i], "location|where")
+  if (length(loc) > 0){
+  df$location[i] <- str_extract(loc, "(?<=(LOCATION|WHERE)).*")
+  }
+}
+
+#Correct location
+{
+df$location2 <- str_replace_all(df$location, "[^(\\w)|[[:space:]]]", "")
+}
+
+
+#Get goals-----
+df$goals <- NA
+for (i in 1:nrow(df)){
+  goal  <- data.frame(fextract(df$stext[i], "\\|(\\s)*([[:alpha:]]|\\d*)(\\s)*\\|", all = T,
+                               case = T))
+  if (length(goal) > 0){
+    goaln <- str_detect(goal[,1], "\\|(\\s)*([[:alpha:]])(\\s)*\\|")
+    goal  <- goal[goaln, 1, drop = F]
+    loc   <- str_locate_all(goal[,1], "\\|")
+    goaltype    <- seq(1,nrow(goal))
+    goal$loc1   <- sapply(loc, "[", c(2))
+    goal$loc2   <- sapply(loc, "[", c(3))
+    df$goals[i] <- paste0(str_replace_all(substr(goal[,1], goal$loc1, goal$loc2),
+                                 "(\\|(\\s)*)|(\\|)", ""), collapse = ";")
+  }
+}
+goals <- str_split(df$goals, ";")
+goals <- lapply(goals, function(x) str_extract_all(x, "(\\d+|:)+"))
+goals <- lapply(goals, function(x) x[lapply(x, length) > 0])
+goals <- lapply(goals, function(x) lapply(x, paste0, collapse = ","))
+goals <- sapply(goals, paste0, collapse = ";")
+df$goalsNumeric <- goals
+#A goal
+df$goalA <- str_extract(df$goalsNumeric, "(\\d+:*)+(?=(;|$))")
+sel           <- which(nchar(df$goalA) == 4)
+df$goalA[sel] <- paste0(df$goalA[sel], ":00")
+df$goalA      <-as.POSIXct( df$goalA, format ="%H:%M:%S")
+
+#Get coach-----
+df$coach      <- "Other"
+sel           <- which(str_detect(toupper(df$text), "DANIELS|JD|JACK"))
+df$coach[sel] <- "Daniels"
+sel           <- which(str_detect(toupper(df$text), "PETE|PFIT"))
+df$coach[sel] <- "Pete"
+table(df$coach)
+
+
+#Get splits-----
+df$splits <- NA
+for (i in 1:nrow(df)){
+  splits  <- fextract(df$stext[i], "\\|(\\s)*(\\d+)(\\s)*\\|", all = T, case = T)
+  if (length(splits) == 0){ next }
+  splits  <- str_replace_all(splits, "\\s", "")
+  splits  <- splits[str_detect(splits, "\\|(\\s)*(\\d+|(\\.)*)+(\\s)*\\|")]
+  if (length(splits) == 0){ next }
+  splits  <- str_extract_all(splits, "(?<=\\|)(\\d+:*)+(?=\\|$|$)")
+  if (length(splits) == 0){ next }
+  splits  <- paste0(unlist(splits), collapse = ",")
+  df$splits[i] <- splits
+}
+
+
+#Get strava----
+df$strava <- str_extract(df$text, "https://www.strava\\.com/activities/\\d+")
+#Age, gender, delete, check------
+df$age    <- NA
+df$gender <- NA
+df$delete <- NA
+df$check  <- NA
+```
+
+```{r Scrape strava}
+if (F){
+pgsession    <-session("https://www.strava.com/login")
+pgform       <-html_form(pgsession)[[1]]  
+filled_form  <-set_values(pgform, email="trytest@tiscali.it", password="12345678")
+session_submit(pgsession, filled_form)
+
+df$stravaAthlete <- NA
+for (i in 1:10){
+  link <- df$strava[i]
+  strava <-session_jump_to(pgsession, link)
+  at     <- strava %>% 
+            rvest::html_nodes('body') %>% 
+            xml2::xml_find_all("//a[contains(@class, 'minimal')]") %>% 
+            rvest::html_attr('href')
+  df$stravaAthlete <- at
+}
+}
+```
+
+```{r Manual insertion}
+#First manual insertion------
+mdf    <- df[,c("title", "time", "location2", "distance2", "racetime2")]
+mdf$id <- 1:nrow(mdf)
+mdf    <- mdf[,c(ncol(mdf), 1:(ncol(mdf)-1))]
+if (F) {fwrite(mdf, "Manual insertion/manual insetion data1.txt")}
+#Second manual insertion------
+cols   <- c("title", "time", "location2", "distance2", "racetime2", "age", "gender", "delete")
+odf    <- odf[odf$delete!="1" & odf$check != "1",cols]
+odf$id <- 1:nrow(odf)
+odf    <- odf[,c(ncol(odf), 1:(ncol(odf)-1))]
+if (F) {fwrite(odf, "Manual insertion/manual insetion data2.txt")}
+#Third manual insertion------
+cols   <- c("title", "time", "location2", "distance2", "racetime2", "age", "gender", "delete")
+odf    <- odf[odf$delete!="1" & odf$check != "1",cols]
+odf    <- odf[odf$distance2 == "" | odf$racetime2 == "",]
+odf    <- setDT(odf)[order(-distance2)]
+odf$id <- 1:nrow(odf)
+odf    <- data.frame(odf)
+odf    <- odf[,c(ncol(odf), 1:(ncol(odf)-1))]
+if (F) {fwrite(odf, "Manual insertion/manual insetion data3.txt")}
+#Fourth manual insertion-----
+cols   <- c("title", "time", "location2", "distance2", "racetime2")
+odf    <- odf[odf$delete!="1" & odf$check != "1",cols]
+odf    <- odf[odf$distance2 == "" | odf$racetime2 == "",]
+odf    <- setDT(odf)[order(-distance2)]
+odf$id <- 1:nrow(odf)
+odf    <- data.frame(odf)
+odf    <- odf[,c(ncol(odf), 1:(ncol(odf)-1))]
+if (F) {fwrite(odf, "Manual insertion/manual insetion data4.txt")}
+```
+
+```{r Construct table}
+cols      <- c("title", "time", "location2", "distance2", "racetime2", "age", "gender",
+               "goalsNumeric","goalA", "coach","splits","user",  "delete", "check")
+odf       <- df[,cols]
+odf       <- data.frame(lapply(odf, as.character), stringsAsFactors = F)
+
+for (i in 1:3){
+  mdf1      <- read.xlsx(paste0("Manual insertion/manual insetion", i, ".xlsx"), sheet = 2)
+  colsmdf1  <- names(mdf1)
+  addcols   <- cols[!cols %in% colsmdf1]
+  if (length(addcols) > 0){
+    join        <- data.frame(matrix(nrow = nrow(mdf1), ncol = length(addcols)))
+    names(join) <- addcols
+    mdf1        <- cbind(mdf1, join)
+  }
+  mdf1      <- mdf1[,cols]
+  mdf1      <- data.frame(lapply(mdf1, as.character), stringsAsFactors = F)
+  mdf1$time <- str_replace_all(mdf1$time, c("T" = " ", "Z"= ""))
+  join              <- odf[,1:2]
+  mdf1              <- merge(mdf1,join, on = c("title", "time"), all = T)
+  join              <- mdf1[,1:2]
+  odf               <- merge(odf,join, on = c("title", "time"), all = T)
+  odf               <- setDT(odf)[join,  on = c("title", "time")]
+  mdf1[is.na(mdf1)] <- ""
+  odf[is.na(odf)]   <- ""
+  odf               <- data.frame(odf)
+  mdf1              <- data.frame(mdf1)
+  sel               <- odf != mdf1 & mdf1 != ""
+  odf[sel]          <- mdf1[sel]
+}
+```
+
+```{r Final table}
+df <- odf
+df$time     <-as.POSIXct(df$time)
+df$racetimeF <- as.POSIXct(df$racetime2, format = "%H:%M:%S")
+df           <- df[!is.na(df$racetimeF),]
+
+df <- df[which(df$distance2 == "marathon"),]  
+df <- df[substr(df$racetimeF,13,13) >= 2 & substr(df$racetimeF,13,13) <= 6,]
+df <- df[!is.na(df$racetimeF),]
+table(str_count(df$splits,","))
+#df <- df[str_count(df$splits,",")==25,]
+```
+
+##Data overview
+```{r Number of race reports by distance}
+stats <- setDT(df)[,list(n = .N), by = distance2]
+knitr::include_graphics("Charts/Reports by distance.png")
+```
+
+```{r Number of user reports}
+stats <- setDT(df)[,list(n = .N), by = user]
+```
+
+
+##Viz
+```{r Functions for data visualization}
+dtotime  <- function(date, string = T){
+  date <- hms(substr(date, 12,19))
+  if (string){
+  date <- as.character(date)
+  }
+  return(date)
+}
+hposi     <- function(hour){
+  hour <- as.POSIXct(hour, format = "%H:%M:%S")
+  return(hour)
+}
+htostr <- function(hour){
+  hour <- limits[1]
+  hour <- as.character(hour)
+  hour <- str_replace_all(hour, c("H " = ":",
+                                  "M " = ":",
+                                  "S"  = ""))
+  hour <- paste0("0", hour)
+  return(hour)
+}
+
+vhist <- function(data    = NULL,
+                  vlimits = NULL,
+                  bins    = 5*60){
+  plotdata   <- data
+  min        <- min(plotdata$racetimeF)
+  max        <- max(plotdata$racetimeF)
+  limits     <- dtotime(c(min,max))
+  ifelse(is.null(vlimits), limits <- limits, limits <- vlimits)
+  plotdata   <- plotdata[dtotime(plotdata$racetimeF) >= limits[1] &
+                         dtotime(plotdata$racetimeF) <= limits[2],]
+  min        <- min(plotdata$racetimeF)
+  max        <- max(plotdata$racetimeF)
+  breaks     <- seq(floor_date(min, paste0(bins/60," minutes")),
+                    ceiling_date(max, paste0(bins/60," minutes")),by = bins)
+  limits     <- breaks[c(1, length(breaks))]
+  limits[1]  <- limits[1] - bins
+  limits[2]  <- limits[2] + bins
+  #plotbreaks <- breaks[dtotime(breaks,F) >= limits[1] & dtotime(breaks,F) <= limits[2]]  
+  plotbreaks <- breaks 
+  
+  plotdata$racetimePlot   <- as.POSIXct(cut(plotdata$racetimeF, breaks, right = F))
+  plotdata$racetimePlot   <- plotdata$racetimePlot + bins
+  plotdata <- setDT(plotdata)[,list(n = .N), by = racetimePlot]
+  add      <- breaks[!breaks %in% plotdata$racetimePlot]
+  add      <- data.frame(racetimePlot = add, n = 0)
+  plotdata <- rbind(plotdata, add)
+  plotdata <- plotdata[order(plotdata$racetimePlot),]
+  plotdata$col <- rep(c("#152951", "#25488e"), length.out = nrow(plotdata))
+    
+  p <- ggplot(plotdata, aes(x = racetimePlot, y = n))
+  p <- p + geom_bar(stat = "identity", fill = plotdata$col,
+                    position = position_dodge(width=0.01))
+  p <- p + geom_text(aes(label=n), vjust = -0.25, size = 5,
+                                             col = plotdata$col)
+  p <- p + scale_x_datetime(breaks = plotbreaks, labels = paste0("<",substr(plotbreaks,12,19)),
+                            limits = limits, expand = c(0,0))
+  p <- p + scale_y_continuous(expand = c(0,0), limits = c(0, max(plotdata$n)*1.1))
+  p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, color = plotdata$col),
+                 axis.text = element_text(size = 15),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 axis.text.y = element_blank(),
+                 panel.grid = element_blank(),
+                 panel.background = element_rect(fill = "#ebf0fa"),
+                 plot.margin = margin(r = 0.5, unit = "cm"))
+  p
+}
+
+vhist(df)
+vhist(df, vlimits = c(hms("02:10:00", "04:50:00")), bins = 5*60)
+
+vdens <- function(data    = NULL,
+                  vlimits = NULL,
+                  bins    = 5*60){
+  #Data-----
+  stats      <- data
+  bins       <- 5*60
+  min        <- min(stats$racetimeF)
+  max        <- max(stats$racetimeF)
+  limits     <- dtotime(c(min,max))
+  if (is.null(vlimits)){ limits <- limits } else { limits <- vlimits }
+  plotdata   <- stats[dtotime(stats$racetimeF) >= limits[1] &
+                      dtotime(stats$racetimeF) <= limits[2],]
+  min        <- min(plotdata$racetimeF)
+  max        <- max(plotdata$racetimeF)
+  breaks     <- seq(floor_date(min, "5 minutes") ,ceiling_date(max, "5 minutes"),by = bins)
+
+  stats$racetimeF <- period_to_seconds(hms(dtotime(stats$racetimeF)))
+  stats  <- stats[!is.na(stats$racetimeF),]
+  labels <- substr(breaks, 12,19)
+  breaks <- period_to_seconds(hms(labels))
+  
+  plotdata <- data.frame(density(stats$racetimeF)[c("x", "y")])
+  plotdata <- plotdata[plotdata$x >= period_to_seconds(limits[1]) &
+                       plotdata$x <= period_to_seconds(limits[2]),]
+  
+  mean     <- sum(plotdata$x*plotdata$y)/sum(plotdata$y)
+  median   <- seconds_to_period(median(rep(plotdata$x, round(plotdata$y*10000000,0))))
+  #Plot estimated distribution-----
+  p <- ggplot(plotdata, aes(x = x, y = y)) + geom_line()
+  p <- p + geom_vline(aes(xintercept=seconds_to_period(mean)),
+                         color="blue", linetype="dashed", size=1)
+  p <- p + geom_vline(aes(xintercept=seconds_to_period(median)),
+                         color="red", linetype="dashed", size=1)
+  p <- p + annotate("text", x = mean+200, y= 0, angle = 90, hjust = 0,
+                    label = paste0("mean: ", seconds_to_period(round(mean,0))),
+                    col = "blue", size = 5)
+  p <- p + annotate("text", x = median-200, y= 0, angle = 90, hjust = 0,
+                    label = paste0("median: ", seconds_to_period(round(median,0))),
+                    col = "red", size = 5)
+  p <- p + scale_x_continuous(breaks = breaks, labels = labels,
+                              #limits = c(min(plotdata$x)*0.9, max(plotdata$x)*1.1),
+                              expand = c(0,0))
+  p <- p + scale_y_continuous(limits = c(0,max(plotdata$y)*1.1),
+                              expand = c(0,0),
+                              breaks = seq(0, 0.0003,0.0001),
+                              labels = paste0(seq(0, 0.0003,0.0001)*100, "%"))
+  p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 #axis.line = element_line(),
+                 panel.grid.minor.x = element_blank(),
+                 panel.grid.major.y = element_blank(),
+                 panel.grid.minor.y = element_blank(),
+                 panel.grid.major.x = element_line(color = "#152951"),
+                 panel.background = element_rect(fill = "#ebf0fa"),
+                 plot.margin = margin(r = 0.5, unit = "cm"))
+  p
+}
+      
+#vdens(df)
+vdens(df, vlimits = c(hms("02:10:00", "04:50:00")))
+
+
+vdens2 <- function(data     = NULL,
+                   vlimits  = NULL,
+                   bins     = 5*60,
+                   scaleCol = NULL){
+  #Data-----
+  stats      <- data
+  bins       <- 5*60
+  min        <- min(stats$racetimeF)
+  max        <- max(stats$racetimeF)
+  limits     <- dtotime(c(min,max), F)
+  if (is.null(vlimits)){ limits <- limits } else { limits <- vlimits }
+  plotdata   <- stats[dtotime(stats$racetimeF, F) >= limits[1] &
+                      dtotime(stats$racetimeF, F) <= limits[2],]
+  min        <- min(plotdata$racetimeF)
+  max        <- max(plotdata$racetimeF)
+  breaks     <- seq(floor_date(min, "5 minutes") ,ceiling_date(max, "5 minutes"),by = bins)
+
+  plotdata$racetimeF <- period_to_seconds(hms(dtotime(plotdata$racetimeF)))
+  plotdata  <- plotdata[!is.na(plotdata$racetimeF),]
+  labels <- substr(breaks, 12,19)
+  breaks <- period_to_seconds(hms(labels))
+  
+  #Plot estimated distribution-----
+  p <- ggplot(plotdata, aes(x = racetimeF, group = race, color = race)) + geom_density()
+  p <- p + scale_x_continuous(labels = labels,
+                              breaks = breaks,
+                              #limits = c(min(plotdata$x)*0.9, max(plotdata$x)*1.1),
+                              expand = c(0,0))
+  p <- p + scale_y_continuous(#limits = c(0,max(data$racetimeF)),
+                              expand = c(0,0),
+                              breaks = seq(0, 0.0003,0.0001),
+                              labels = paste0(seq(0, 0.0003,0.0001)*100, "%"))
+  p <- p + scaleCol
+  p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+                 axis.title = element_blank(),
+                 axis.ticks = element_blank(),
+                 #axis.line = element_line(),
+                 panel.grid.minor.x = element_blank(),
+                 panel.grid.major.y = element_blank(),
+                 panel.grid.minor.y = element_blank(),
+                 panel.grid.major.x = element_blank(),
+                 panel.background = element_rect(fill = "#ebf0fa"),
+                 plot.margin = margin(r = 0.5, unit = "cm"))
+  p
+}
+
+df$race <- rep_len(c("um", "dois"), length(df$race))
+scaleCol <- scale_color_manual(values = c("um"   = "red",
+                                          "dois" = "blue"))
+vdens2(df, vlimits = c(hms("02:10:00", "04:50:00")), scaleCol = scaleCol)
+
+vgoalres <- function(data = NULL){
+  data <- df
+  data <- data[!is.na(data$goalA),]
+  data <- data[data$racetimeF <= hposi("04:00:00") & data$goalA <= hposi("04:00:00"),]
+  
+  limits <- c(min(c(data$goalA, data$racetimeF))-200, max(c(data$goalA, data$racetimeF))+200)
+  
+  p <- ggplot(data, aes(x = goalA, y = racetimeF)) + geom_jitter(width = 120, alpha = 0.5)
+  p <- p + scale_x_datetime(limits = limits)
+  p <- p + scale_y_continuous(trans = rev_date)
+  p <- p + geom_segment(aes(x = limits[1], xend = limits[2],
+                            y = limits[1], yend = limits[2]))
+  p
+}
+
+c_trans <- function(a, b, breaks = b$breaks, format = b$format) {
+  a <- as.trans(a)
+  b <- as.trans(b)
+
+  name <- paste(a$name, b$name, sep = "-")
+
+  trans <- function(x) a$trans(b$trans(x))
+  inv <- function(x) b$inverse(a$inverse(x))
+
+  trans_new(name, trans, inv, breaks, format = format)
+}
+rev_date <- c_trans("reverse", "time")
+
+vgoalres(df)
+
+```
+
+```{r Correct data in marathon results}
+for (i in 3:9){
+  file   <- paste0("Resultados de maratonas/Maratona-Lisboa-201",i,".xlsx")
+  sheets <- readxl::excel_sheets(file)
+  results<- data.frame()
+  for (s in sheets){
+    m            <- read_excel(file, sheet = s, trim_ws = T)
+    m            <- apply(m, 1, paste0, collapse = ";")
+    time         <- lapply(m, function(x)
+                            str_extract_all(x, "(\\d+:\\d+:\\d+)(?=($|\\n|\\r|\\s{8,}|;NA))"))
+    #time         <- unlist(lapply(time, function(x) lapply(x, function(y) y[length(y)])))
+    time         <- unlist(time)
+    time         <- time[!is.na(time)]
+    if (i != 8){
+    group        <- unlist(lapply(m, function(x)
+                                     str_extract_all(x, "(M|W)\\d+|Sen-(M|F)")))
+    group        <- group[!is.na(group)]
+    } else {
+    group <- rep("M99", length(time))
+    }
+    data         <- data.frame(time, group)
+    results      <- rbind(results, data)
+  }
+  write.xlsx(results,
+             paste0("Resultados de maratonas/Tratado/Maratona-Lisboa-201",i,"data.xlsx"))
+}
+  
+```
+
+```{r Visualization}
+#Marathons-----
+{
+df <- df[which(df$distance2 == "marathon"),]  
+df <- df[substr(df$racetimeF,13,13) >= 2 & substr(df$racetimeF,13,13) <= 6,]
+df <- df[!is.na(df$racetimeF),]
+  
+##Plot histogram with racetimes----
+plotdata <- data.table(df[df$racetimeF <= as.POSIXct("05:00:00", format = "%H:%M:%S"),])
+b                 <- 5*60
+breaks            <- seq(as.POSIXct("02:00:00", format = "%H:%M:%S"),
+                         as.POSIXct("05:00:00", format = "%H:%M:%S"), by = b) 
+plotdata$racetimePlot   <- substr(cut(plotdata$racetimeF, breaks, right = F),12,19)
+plotdata$racetimePlot   <- as.POSIXct(plotdata$racetimePlot, format = "%H:%M:%S")
+plotdata$racetimePlot   <- plotdata$racetimePlot + b
+plotdata <- plotdata[,list(n = .N), by = racetimePlot]
+
+limits     <- c(min(plotdata$racetimePlot),max(plotdata$racetimePlot))
+plotbreaks <- breaks[breaks >= limits[1] & breaks <= limits[2]]
+
+p <- ggplot(plotdata, aes(x = racetimePlot, y = n)) + geom_bar(stat = "identity")
+p <- p + geom_text(aes(label=n), vjust = -0.25, size = 8)
+p <- p + scale_x_datetime(breaks = plotbreaks, labels = paste0("<",substr(plotbreaks,12,19)),
+                          expand = c(0,0))
+p <- p + scale_y_continuous(expand = c(0,0), limits = c(0, max(plotdata$n)*1.1))
+p <- p + theme(axis.text.x = element_text(angle = 90, vjust = 2),
+               axis.text = element_text(size = 15),
+               axis.title = element_blank(),
+               axis.ticks = element_blank(),
+               plot.margin = margin(r = 0.5, unit = "cm"))
+p
+
+##Plot histogram with racetimes
+plot <- list()
+for (i in 3:9){
+  file <- paste0("Resultados de maratonas/Tratado/Maratona-Lisboa-201",i , "data.xlsx")
+  d    <- read.xlsx(file)
+  names(d)[1] <- "racetimeF"
+  d$racetimeF <- hposi(d$racetimeF)
+  print(vhist(d, vlimits = c(hms("02:00:00", "06:50:00"))))
+}
+```
+
+```{r Plot distribution of race dates}
+plotdata             <- df
+plotdata$posted      <- ymd(substr(plotdata$time,1,10))
+day(plotdata$posted) <- 1
+
+plotdata     <- setDT(plotdata)[,list(n = .N), by = posted]
+plotbreaks   <- min(plotdata$posted) + months(1:60)
+plotbreaksbu <- plotbreaks
+plotbreaks   <- plotbreaks[!plotbreaks%in% plotdata$posted]
+plotbreaks   <- data.frame(posted = plotbreaks, n = 0)
+plotdata     <- rbind(plotdata,plotbreaks)[order(posted),]
+plotdata$month  <- month.abb[as.numeric(substr(plotdata$posted,6,7))]
+plotdata$month  <- factor(plotdata$month, levels = rev(month.abb))
+plotdata$year   <- substr(plotdata$posted,1,4)
+#plotdata$posted <- factor(plotdata$posted, levels = plotdata$posted)
+plotdata$otherX <- as.character(plotdata$month)
+plotdata$otherX[plotdata$year != "2021"] <- ""
+nlabels <- plotdata[plotdata$n!=0,]
+ylim    <- c(0, max(plotdata$n)*1.25)
+labp    <- c(-max(plotdata$n)/4, max(plotdata$n)*1.5)
+
+p <- ggplot(plotdata, aes(x = as.numeric(month), y = n)) + geom_bar(stat = "identity")
+p <- p + scale_x_continuous(breaks = 0.5:12.5)
+p <- p + coord_flip(ylim = ylim,xlim = c(1,12), clip = "off")
+p <- p + geom_text(data = data.frame(year = "2021",lab = month.abb), aes(label = lab),
+                   x= 12:1, y = labp[2])
+p <- p + geom_text(data = data.frame(year = "2016",lab = month.abb), aes(label = lab),
+                   x= 12:1, y = labp[1])
+p <- p + geom_text(data=nlabels,aes(label = n), hjust = -0.5)
+p <- p + facet_grid(cols = vars(year))
+p <- p + scale_y_continuous(limits = c(0, max(plotdata$n) + 1),
+                            breaks = 0:130,
+                            expand = c(0,0))
+p <- p + theme(axis.ticks = element_blank(),
+               axis.title = element_blank(),
+               axis.text = element_blank(),
+               panel.grid.major.x = element_blank(),
+               panel.grid.minor.x = element_blank(),
+               panel.grid.minor.y = element_blank(),
+               plot.margin = margin(0,3,0,3, unit = "cm"))
+p
+
+```
+
+```{r Statistics}
+#Plot estimated distribution-----
+vdens(df, hms("02:10:00", "04:30:00"))
+
+
+#Tests
+ggqqplot(stats$racetimeF)
+shapiro.test(stats$racetimeF)
+
+#Maratona de lisboa-----
+for (i in 3:9){
+  mlisb           <- read.xlsx(paste0("Resultados de maratonas/Maratona-Lisboa-201",i,".xlsx"))
+  mlisb$racetimeF <- hposi(mlisb$racetimeF)
+  vdens(mlisb, hms("02:10:00", "06:30:00"))
+  vhist(mlisb)
+}
+
+
+
+#Goals-----
+df <- df[!is.na(df$goalA),]
+df$diff <- df$racetimeF - df$goalA
+
+ggplot(df, aes(x = racetimeF, y = diff)) + geom_point() + geom_smooth()
+
+data <- data.frame(density(as.numeric(df$diff))[c("x", "y")])
+
+p <- ggplot(data, aes(x = x, y = y)) + geom_line()
+p <- p + scale_x_continuous(limits = c(-1200,1200))
+p
+
+shapiro.test(as.numeric(df$diff[df$diff > -1200 & df$diff < 1200]))
+
+x <- seq(-15, 15, by=0.1)
+y <- dnorm(x, mean = 2.5, sd = 2.5)
+plot(x,y)
+
+
+test <- list()
+
+for (i in 1:100){
+  x <- rnorm(4000, mean=90, sd=1)
+  data <- data.frame(density(x)[c("x", "y")])
+  
+  #p <- ggplot(data, aes(x = x, y = y)) + geom_line()
+  #p
+  test[[i]] <- shapiro.test(x)[["p.value"]]
+}
+hist(unlist(test))
+
+data <- 
+p <- ggplot(df, aes(sample = df$diff)) + stat_qq() + stat_qq_line()
+p
+
+#Splits-----
+stats <- df[df$goalA != "",c("racetimeF", "goalA", "splits")]
+join  <- data.frame(transpose(str_split(stats$splits, ",")))
+names(join) <- paste0("mile", 1:26)
+stats       <- cbind(stats, join)
+cols        <- stats[,(ncol(stats)-25):ncol(stats)]
+for (i in 1:26){
+  col <- as.POSIXct(as.character(cols[,i]), format = "%M:%S")
+  col <- as.numeric((col - as.POSIXct("00:00:00", format ="%M:%S"))*60)
+  cols[,i] <- col
+}
+
+stats[,(ncol(stats)-25):ncol(stats)] <- cols
+
+
+for (i in 1:9){
+  if (i < 9){
+  col <- rowSums(stats[,3+(3*i-2):(3*i)])
+  } else {
+  col <- rowSums(stats[,3+(3*i-2):(3*i-1)])*1.5
+  }
+  join        <- data.frame(col)
+  names(join) <- paste0("part", i)
+  stats       <- cbind(stats, join)
+}
+
+
+```
+
+
+#Old stuff
+
+```{r f}
+#Old functions----
+makeParagraph <- function(text, l = 10){
+  text <- as.character(text)
+  newtext <- c()
+  for (j in 1:length(text)){
+    lpara <- 0
+    for (i in 1:(nchar(text)-1)){
+      c     <- substr(text,i,i+1)
+      if ((lpara > l) & substr(c,2,2) == " " & i >= 400){
+        text  <- paste0(substr(text,1,i), "\n",substr(text,i+1,nchar(text)))
+        lpara <- 0
+      } else {
+        lpara <- lpara + 1
+      }
+    }
+    newtext <- c(newtext, text)
+  }
+  return(newtext)
+}
+
+makeParagraph(substr(df$text[1],1,1500))
+
+vizPost <- function(r, l = 1000){
+  r        <- substr(as.character(r),1,l)
+  r        <- unlist(str_split(makeParagraph(r, 75), "\n"))
+  
+  plotdata <- data.frame(label = r)
+  plotdata$x <- 1
+  plotdata$y <- nrow(plotdata):1
+  
+  p        <- ggplot(plotdata, aes = aes(x=x, y = y))
+  p        <- p + geom_text(aes(x = x, y= y, label = label), hjust = 0)
+  #p        <- p + scale_x_continuous(limits = c(1, nrow(plotdata)+1))
+  #p        <- p + scale_y_continuous(limits = c(0,))
+  return(p)
+}
+
+
+mpara <- function(text, l = 10){
+  text <- df$text[1]
+  text <- as.character(text)
+  
+}
+
+viz <- function(text){
+p <- ggplot() + 
+     #annotate("text", x = c(0), y = c(0), size=5, label = df$text[1], hjust = 0, vjust = 1) +
+     geom_text(x = c(0), y = c(0), size=5, label = text) +
+     theme_void() +
+     scale_x_continuous(limits = c(0,1), expand = c(0.01,0)) +
+     scale_y_continuous(limits = c(-1,0), expand = c(0,0)) +
+     theme(plot.margin = unit(c(0,0,0,0), "cm"),
+     panel.border = element_blank())
+return(p)
+}
+
+ggsave(plot = p, device = "png", filename = "report.png", height = 15, width = 30)
+
+par(lheight = 0.1)
+
+#Make paragraph
+mpara <- function(text){
+  text <- as.character(text)
+  text <- str_replace_all(text, "\\.[[:space:]]", "\\.\n")
+}
+
+#Good viz----
+viz <- function(text){
+p <- ggplot(data.frame(x = c(0,1), y =c(0,1))) + 
+     #annotate("text", x = c(0), y = c(0), size=5, label = df$text[1], hjust = 0, vjust = 1) +
+     geom_text(x = 0, y = 0, label = text,hjust = 0, vjust = 1, lineheight = .8, size = 6) +
+     scale_x_continuous(limits = c(0,1), expand = c(0.01,0)) +
+     scale_y_continuous(limits = c(-1,0), expand = c(0,0)) +
+     theme(plot.margin = unit(c(0,0,0,0), "cm"),
+     panel.border = element_blank(),
+     text = element_text(lineheight = 5)) + theme_void()
+return(p)
+}
+
+for (i in 1:38){
+  cat(i)
+  p <- viz(mpara(df$text[i]))
+  ggsave(plot = p, device = "png", filename = paste0("Viz/report", i,".png"), height = 15, width = 30)
+}
+
+
+```
+
+```{r v2}
+a <- get_reddit(search_terms = "Race Report", subreddit = "Advancedrunning", page_threshold = 1000000)
+a1<- reddit_urls(subreddit = "AdvancedRunning", page_threshold = 1000000)
+a2 <- reddit_urls_edu(subreddit = "AdvancedRunning", page_threshold = 1000000)
+b <- get_reddit(search_terms = "Race report", subreddit = "Advancedrunning")
+b <- reddit_content("http://www.reddit.com/r/AdvancedRunning/comments/mlzf2z/dorney_marathon_race_report")
+
+t <- fromJSON(readLines("https://www.reddit.com/r/AdvancedRunning/.json?q=race&restrict_sr=on&t=all&before=t2_khc48", warn))
+
+t <- list()
+for (day in 1){
+  cat(day)
+  link   <- paste0("https://www.reddit.com/r/AdvancedRunning/.json?q=race&restrict_sr=on&t=all&sort=new")
+  result <- fromJSON(paste0(readLines(link, warn = F), collapse = ""))$data$children
+  t[[day]] <- result
+}
+
+
+
+perma <- c()
+day   <- c()
+id    <- c()
+for (i in 1:length(t)){
+  data <- t[[i]]
+  for (j in 1:length(data)){
+    perma <- c(perma, data[[j]]$data$permalink)
+    day   <- c(day, data[[j]]$data$created_utc)
+    id    <- c(id, i)
+  }
+}
+df <- data.frame(id    = id,
+                 perma = perma,
+                 time  = lubridate::as_datetime(day))
+perma <- unique(perma)
+```
+
+```{r v3}
+t <- list()
+lastThing <- ""
+for (page in 1:100){
+  cat(page)
+  link   <- paste0("https://www.reddit.com/r/AdvancedRunning/new/.json?restrict_sr=on&t=all&sort=desc&after=", lastThing)
+  result <- fromJSON(paste0(readLines(link, warn = F), collapse = ""))$data$children
+  t[[page]] <- result
+  l        <- length(t[[page]])
+  lastThing   <- t[[page]][[l]]$data$name
+  print(lastThing)
+}
+
+
+perma <- c()
+day   <- c()
+id    <- c()
+for (i in 1:length(t)){
+  data <- t[[i]]
+  for (j in 1:length(data)){
+    perma <- c(perma, data[[j]]$data$permalink)
+    day   <- c(day, data[[j]]$data$created_utc)
+    id    <- c(id, i)
+  }
+}
+df <- data.frame(id    = id,
+                 perma = perma,
+                 time  = lubridate::as_datetime(day))
+
+```
+
+```{r Functions}
+search_terms   <- "race report"
+regex_filter   <- ""
+subreddit      <- "AdvancedRunning" 
+cn_threshold   <- 0
+page_threshold <- 10000000
+sort_by        <- "relevance"
+wait_time      <- 2
+
+reddit_urls_edu <- function (search_terms = NA, regex_filter = "", subreddit = NA, 
+  cn_threshold = 0, page_threshold = 1, sort_by = "relevance", 
+  wait_time = 2) 
+{
+  #Search words with spaces
+  sterms = ifelse(is.na(search_terms), NA, gsub("\\s", "+", 
+    search_terms))
+  #Empty table with links
+  cached_links = data.frame(date = as.Date(character()), num_comments = numeric(), 
+    title = character(), subreddit = character(), URL = character())
+  #Subreddits with spaces
+  subreddit = ifelse(is.na(subreddit), "", paste0("r/", gsub("\\s+", 
+    "+", subreddit), "/"))
+  #Build link
+  sterms = ifelse(is.na(sterms), "", paste0("q=", sterms, 
+    "&restrict_sr=on&"))
+  #Search or not search
+  sterms_prefix = ifelse(sterms == "", "new", "search")
+  #Search link start for all links
+  search_address = search_query = paste0("https://www.reddit.com/", 
+    subreddit, sterms_prefix, ".json?", sterms, "sort=", 
+    sort_by)
+  next_page = index = ""
+  page_counter = 0
+  comm_filter = 10000000000
+  while (is.null(next_page) == FALSE & page_counter < page_threshold & 
+    comm_filter >= cn_threshold & length(index) > 0) {
+    search_JSON = tryCatch(RJSONIO::fromJSON(readLines(search_query, 
+      warn = FALSE)), error = function(e) NULL)
+    if (is.null(search_JSON)) {
+      cat(paste("Cannot connect to the website, skipping...\n"))
+      next
+    }
+    else {
+      contents = search_JSON[[2]]$children
+      search_permalink = paste0("http://www.reddit.com", 
+        sapply(seq(contents), function(x) contents[[x]]$data$permalink))
+      search_num_comments = sapply(seq(contents), function(x) contents[[x]]$data$num_comments)
+      search_title = sapply(seq(contents), function(x) contents[[x]]$data$title)
+      search_score = sapply(seq(contents), function(x) contents[[x]]$data$score)
+      search_subreddit = sapply(seq(contents), function(x) contents[[x]]$data$subreddit)
+      #Consider only links with more than defined comments and regex fitler
+      index = which(search_num_comments >= cn_threshold & 
+        grepl(regex_filter, search_title, ignore.case = T, 
+          perl = T))
+      
+      if (length(index) > 0) {
+        search_date = format(as.Date(as.POSIXct(unlist(lapply(seq(contents), 
+          function(x) contents[[x]]$data$created_utc)), 
+          origin = "1970-01-01")), "%d-%m-%y")
+        temp_dat = data.frame(date = search_date, num_comments = search_num_comments, 
+          title = search_title, subreddit = search_subreddit, 
+          URL = search_permalink, stringsAsFactors = FALSE)[index, 
+          ]
+        cached_links = as.data.frame(rbind(cached_links, 
+          temp_dat))
+        next_page = search_JSON$data$after
+        comm_filter = utils::tail(search_num_comments, 
+          1)
+        search_query = paste0(search_address, "&after=", 
+          next_page)
+        page_counter = page_counter + 1
+      }
+      Sys.sleep(min(2, wait_time))
+    }
+  }
+  final_table = cached_links[!duplicated(cached_links), ]
+  if (dim(final_table)[1] == 0) {
+    cat(paste("\nNo results retrieved, check your query"))
+  }
+  else {
+    remove_row = which(final_table[, 1] == "")
+    if (length(remove_row) > 0) {
+      final_table = final_table[-remove_row, ]
+    }
+    #return(final_table)
+  }
+}
+
+link <- "https://api.pushshift.io/reddit/search/submission/?q=race&subreddit=AdvancedRunning&after=30d&before60d"
+a1 <- fromJSON(readLines(link, warn = F))
+
+reports <- list()
+for (day in 1:10){
+  cat(day)
+  link   <- paste0("https://api.pushshift.io/reddit/search/submission/?q=race&subreddit=AdvancedRunning&after=",day,"d&before=", day-1, "d")
+  result <- fromJSON(paste0(readLines(link, warn = F), collapse = ""))
+  reports[[day]] <- result
+}
+
+
+perma <- c()
+day   <- c()
+id    <- c()
+for (i in 1:length(reports)){
+  data <- reports[[i]]$data
+  for (j in 1:length(data)){
+    perma <- c(perma, data[[j]]$permalink)
+    day   <- c(day, data[[j]]$created_utc)
+    id    <- c(id, i)
+  }
+}
+
+df <- data.frame(id    = id,
+                 perma = perma,
+                 time  = lubridate::as_datetime(day))
+perma <- unique(perma)
+
+datas <- data.frame(links = unlist(sapply(reports, function(x) x$data$created_utc)))
+datas$links <-lubridate::as_datetime(datas$links)
+datas$id    <- unlist(sapply(reports, function(x) seq(length(x$data$permalink))))
+datas <- unique(datas)
+```
